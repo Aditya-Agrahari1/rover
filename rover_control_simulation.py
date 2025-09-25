@@ -1,64 +1,101 @@
-# Simple Servo Control Script for Raspberry Pi
-# Description: This script controls a single servo motor, making it scan
-# right, then left, and return to center in a continuous loop.
+# AgriSense Rover Control Script - SIMULATION MODE
+# Version: 2.0 (for Raspberry Pi 5)
+# Description:
+#   Controls rover movement with an L298N motor driver and a servo
+#   using gpiozero (works with Pi 5). This is a simulation-friendly
+#   script; adjust pins according to your wiring.
 
-import RPi.GPIO as GPIO
-import time
+from gpiozero import Motor, Servo
+from time import sleep
 
 # --- CONFIGURATION ---
-# IMPORTANT: Connect the servo's signal wire to this BCM pin number.
-SERVO_PIN = 18 
+# Motor driver pins (BCM numbering)
+LEFT_MOTOR_FORWARD = 17
+LEFT_MOTOR_BACKWARD = 27
+RIGHT_MOTOR_FORWARD = 23
+RIGHT_MOTOR_BACKWARD = 24
+
+# Servo pin (BCM numbering)
+SERVO_PIN = 18
 
 # --- SETUP ---
-# Use BCM pin numbering
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
+# Motor setup
+left_motor = Motor(forward=LEFT_MOTOR_FORWARD, backward=LEFT_MOTOR_BACKWARD)
+right_motor = Motor(forward=RIGHT_MOTOR_FORWARD, backward=RIGHT_MOTOR_BACKWARD)
 
-# Set up the servo pin as a PWM output
-GPIO.setup(SERVO_PIN, GPIO.OUT)
-# Initialize PWM on the servo pin at 50Hz (standard for servos)
-servo = GPIO.PWM(SERVO_PIN, 50) 
-servo.start(7.5) # Start the servo at 90 degrees (center)
-time.sleep(1)    # Wait for the servo to get to the initial position
+# Servo setup
+servo = Servo(SERVO_PIN)
 
-def set_angle(angle):
-    """Moves the servo to a specific angle (0 to 180 degrees)."""
-    # Formula to convert angle to the required PWM duty cycle
-    duty_cycle = (angle / 18) + 2.5
-    servo.ChangeDutyCycle(duty_cycle)
-    # Wait for 1 second to allow the servo to complete its movement
-    time.sleep(1)
+# --- MOVEMENT FUNCTIONS ---
+def move_forward(duration=2):
+    print("Moving forward...")
+    left_motor.forward()
+    right_motor.forward()
+    sleep(duration)
+    stop()
+
+def move_backward(duration=2):
+    print("Moving backward...")
+    left_motor.backward()
+    right_motor.backward()
+    sleep(duration)
+    stop()
+
+def turn_left(duration=1):
+    print("Turning left...")
+    left_motor.backward()
+    right_motor.forward()
+    sleep(duration)
+    stop()
+
+def turn_right(duration=1):
+    print("Turning right...")
+    left_motor.forward()
+    right_motor.backward()
+    sleep(duration)
+    stop()
+
+def stop():
+    print("Stopping...")
+    left_motor.stop()
+    right_motor.stop()
+
+def servo_scan():
+    """Moves servo right -> center -> left -> center"""
+    print("Servo moving right...")
+    servo.max()
+    sleep(1)
+
+    print("Servo center...")
+    servo.mid()
+    sleep(1)
+
+    print("Servo moving left...")
+    servo.min()
+    sleep(1)
+
+    print("Servo back to center...")
+    servo.mid()
+    sleep(1)
 
 # --- MAIN LOOP ---
 try:
-    print("Starting servo scan loop. Press Ctrl+C to stop.")
+    print("Starting rover simulation. Press Ctrl+C to stop.")
     while True:
-        # 1. Move 90 degrees right (position 180)
-        print("Moving right...")
-        set_angle(180)
+        move_forward(2)
+        turn_left(1)
+        move_forward(2)
+        turn_right(1)
 
-        # 2. Move back to the original position (center)
-        print("Returning to center...")
-        set_angle(90)
+        servo_scan()
 
-        # 3. Move 90 degrees left (position 0)
-        print("Moving left...")
-        set_angle(0)
-
-        # 4. Move back to the original position (center)
-        print("Returning to center...")
-        set_angle(90)
-
-        # 5. Wait for 2 seconds before repeating
-        print("Waiting for 2 seconds...")
-        time.sleep(2)
+        print("Pausing 2 seconds...")
+        sleep(2)
 
 except KeyboardInterrupt:
-    # This block runs when you press Ctrl+C
     print("\nProgram stopped by user.")
 
 finally:
-    # This block runs at the end, no matter what
-    print("Cleaning up GPIO...")
-    servo.stop()       # Stop the PWM signal
-    GPIO.cleanup()     # Reset the GPIO pins
+    print("Cleaning up (motors + servo stopped).")
+    stop()
+    servo.mid()  # Reset servo to center
