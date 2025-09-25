@@ -1,32 +1,25 @@
-from gpiozero import Servo
+from gpiozero import AngularServo
 from time import sleep
 
-servo = Servo(18)
+# Use GPIO18 (supports hardware PWM)
+servo = AngularServo(18, min_angle=0, max_angle=180, min_pulse_width=0.0005, max_pulse_width=0.0025)
 
 while True:
-    # Rotate right
-    servo.value = 1   # full speed right
-    sleep(0.5)        # adjust time for ~90° movement
-    servo.value = 0   # stop
-    sleep(0.5)
-
-    # Back to center (simulate by reversing briefly)
-    servo.value = -1  # full speed left
-    sleep(0.5)        
-    servo.value = 0   # stop
-    sleep(0.5)
-
-    # Rotate left
-    servo.value = -1
-    sleep(0.5)
-    servo.value = 0
-    sleep(0.5)
+    # Right 90°
+    servo.angle = 90
+    sleep(1)
 
     # Back to center
-    servo.value = 1
-    sleep(0.5)
-    servo.value = 0
-    sleep(0.5)
+    servo.angle = 0
+    sleep(1)
 
-    # Wait before repeating
+    # Left -90° (or  -90 if calibrated)
+    servo.angle = -90
+    sleep(1)
+
+    # Back to center
+    servo.angle = 0
+    sleep(1)
+
+    # Wait 2 seconds
     sleep(2)
