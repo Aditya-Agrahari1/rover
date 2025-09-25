@@ -1,11 +1,10 @@
-# AgriSense Rover Control Script - SIMULATION MODE
-# Version: 1.0
-# Description: This script simulates the AgriSense rover's functions.
-# It connects to a mobile IP camera, captures images, and sends them to a backend
-# for analysis, while simulating the rover's movements without requiring motor hardware.
+# AgriSense Rover Control Script - HARDWARE MODE
+# Version: 2.1 (with Servo Scan)
+# Description: This script controls the physical AgriSense rover.
+# It uses a servo to scan the plant, connects to an IP camera, captures images, 
+# sends them to a backend, and uses RPi.GPIO to control motors.
 
-# No longer needed for simulation, but good to keep the import commented
-# import RPi.GPIO as GPIO
+import RPi.GPIO as GPIO
 import time
 import requests
 import cv2
@@ -13,77 +12,146 @@ import numpy as np
 
 # -----------------------------------------------------------------------------
 # --- CONFIGURATION & CALIBRATION ---
-# --- Adjust these values for your specific setup ---
 # -----------------------------------------------------------------------------
 
 # -- Backend Server URL --
-# IMPORTANT: Replace with the actual IP address of the computer running your backend server
 BACKEND_URL = "https://agrisense-backend-trdc.onrender.com/analyze"
 
 # -- IP Camera URL --
-# IMPORTANT: Replace with the URL from your IP Webcam app on your phone
-# It often ends in /video or /shot.jpg
 IP_CAMERA_URL = "http://192.168.117.249:8080/video"
 
-# -- Farm Dimensions (Provided by Farmer) --
-ROW_LENGTH_M = 10.0      # Length of one crop row in meters
-CROPS_PER_ROW = 5        # Number of plants in a single row
-TOTAL_COLUMNS = 3        # Total number of columns to scan
+# -- GPIO Pin Configuration (using BCM numbering) --
+# L298N Motor Driver Pins
+MOTOR_L_IN1 = 24
+MOTOR_L_IN2 = 23
+MOTOR_L_ENA = 25
+MOTOR_R_IN3 = 17
+MOTOR_R_IN4 = 27
+MOTOR_R_ENB = 22
 
-# -- Rover Movement Calibration (Used for timing the simulation) --
-MOTOR_SPEED_MPS = 0.2    # Assumed speed of the rover in meters per second
-NINETY_DEGREE_TURN_TIME_S = 1.5 # Time in seconds for a 90-degree turn
-COLUMN_SHIFT_DISTANCE_M = 0.5 # The distance between two crop columns in meters
+# Servo Motor Pin (Connect the signal wire of the servo here)
+SERVO_PIN = 18  # <<< NEW: Using GPIO 18 for the servo
+
+# -- Farm Dimensions --
+ROW_LENGTH_M = 10.0
+CROPS_PER_ROW = 5
+TOTAL_COLUMNS = 3
+
+# -- Rover Calibration --
+MOTOR_SPEED_MPS = 0.2
+NINETY_DEGREE_TURN_TIME_S = 1.5
+COLUMN_SHIFT_DISTANCE_M = 0.5
 
 # -----------------------------------------------------------------------------
 # --- SCRIPT INITIALIZATION ---
 # -----------------------------------------------------------------------------
 
-# Calculate distance between plants to determine movement time
 if CROPS_PER_ROW > 1:
     DISTANCE_PER_CROP_M = ROW_LENGTH_M / (CROPS_PER_ROW - 1)
 else:
     DISTANCE_PER_CROP_M = 0
 
-# --- MOCKED HARDWARE FUNCTIONS (SIMULATION) ---
-# These functions print actions and pause instead of controlling motors.
+# Global PWM objects for speed and servo control
+pwm_l = None
+pwm_r = None
+servo_pwm = None # <<< NEW
+
+# --- HARDWARE FUNCTIONS ---
 
 def setup_gpio():
-    """Simulates GPIO pin setup."""
-    print("[SIM] GPIO setup skipped (Simulation Mode).")
+    """Initializes GPIO pins for motor and servo control."""
+    global pwm_l, pwm_r, servo_pwm # <<< MODIFIED
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    
+    # Setup Motor Pins
+    motor_pins = [MOTOR_L_IN1, MOTOR_L_IN2, MOTOR_L_ENA, MOTOR_R_IN3, MOTOR_R_IN4, MOTOR_R_ENB]
+    for pin in motor_pins:
+        GPIO.setup(pin, GPIO.OUT)
+    
+    # Setup Motor PWM
+    pwm_l = GPIO.PWM(MOTOR_L_ENA, 100)
+    pwm_r = GPIO.PWM(MOTOR_R_ENB, 100)
+    pwm_l.start(75)
+    pwm_r.start(75)
+    
+    # <<< NEW: Setup Servo Pin and PWM >>>
+    GPIO.setup(SERVO_PIN, GPIO.OUT)
+    servo_pwm = GPIO.PWM(SERVO_PIN, 50) # 50Hz is standard for servos
+    servo_pwm.start(7.5) # Start at 90 degrees (center position)
+    time.sleep(1) # Wait for servo to initialize
+    
+    print("GPIO setup complete for motors and servo.")
+
+# <<< NEW: Function to control the servo angle >>>
+def set_angle(angle):
+    """Converts angle (0-180) to PWM duty cycle and moves servo."""
+    # Duty cycle formula: (angle / 18) + 2.5
+    # 0 degrees = 2.5% duty cycle
+    # 90 degrees = 7.5% duty cycle
+    # 180 degrees = 12.5% duty cycle
+    duty_cycle = (angle / 18) + 2.5
+    servo_pwm.ChangeDutyCycle(duty_cycle)
+    # Give the servo time to move to the new position
+    time.sleep(0.5)
+
+# <<< NEW: Function to perform the requested scan sequence >>>
+def perform_servo_scan():
+    """Moves servo right, center, left, center, then waits."""
+    print("   Scanning with servo...")
+    set_angle(180) # 90 degrees right of center
+    set_angle(90)  # Back to center (original position)
+    set_angle(0)   # 90 degrees left of center
+    set_angle(90)  # Back to center
+    print("   Scan complete. Waiting 2 seconds...")
+    time.sleep(2)
+
+
+def stop_motors():
+    GPIO.output(MOTOR_L_IN1, GPIO.LOW)
+    GPIO.output(MOTOR_L_IN2, GPIO.LOW)
+    GPIO.output(MOTOR_R_IN3, GPIO.LOW)
+    GPIO.output(MOTOR_R_IN4, GPIO.LOW)
 
 def move_forward(duration_s):
-    """Simulates moving the rover forward."""
-    print(f"[SIM] Moving forward for {duration_s:.2f} seconds...")
+    print(f"Moving forward for {duration_s:.2f} seconds...")
+    GPIO.output(MOTOR_L_IN1, GPIO.HIGH)
+    GPIO.output(MOTOR_L_IN2, GPIO.LOW)
+    GPIO.output(MOTOR_R_IN3, GPIO.HIGH)
+    GPIO.output(MOTOR_R_IN4, GPIO.LOW)
     time.sleep(duration_s)
-    print("[SIM] Move complete.")
+    stop_motors()
 
 def turn_right(duration_s):
-    """Simulates turning the rover right."""
-    print(f"[SIM] Turning right for {duration_s:.2f} seconds...")
+    print(f"Turning right for {duration_s:.2f} seconds...")
+    GPIO.output(MOTOR_L_IN1, GPIO.HIGH)
+    GPIO.output(MOTOR_L_IN2, GPIO.LOW)
+    GPIO.output(MOTOR_R_IN3, GPIO.LOW)
+    GPIO.output(MOTOR_R_IN4, GPIO.HIGH)
     time.sleep(duration_s)
-    print("[SIM] Turn complete.")
+    stop_motors()
 
 def turn_left(duration_s):
-    """Simulates turning the rover left."""
-    print(f"[SIM] Turning left for {duration_s:.2f} seconds...")
+    print(f"Turning left for {duration_s:.2f} seconds...")
+    GPIO.output(MOTOR_L_IN1, GPIO.LOW)
+    GPIO.output(MOTOR_L_IN2, GPIO.HIGH)
+    GPIO.output(MOTOR_R_IN3, GPIO.HIGH)
+    GPIO.output(MOTOR_R_IN4, GPIO.LOW)
     time.sleep(duration_s)
-    print("[SIM] Turn complete.")
+    stop_motors()
 
 # -----------------------------------------------------------------------------
 # --- CORE LOGIC FUNCTIONS ---
 # -----------------------------------------------------------------------------
 
 def move_forward_one_plant():
-    """Calculates the required time and simulates moving to the next plant."""
     if MOTOR_SPEED_MPS == 0:
-        print("Error: Motor speed is not calibrated (0). Cannot simulate movement.")
+        print("Error: Motor speed is not calibrated (0). Cannot move.")
         return
     move_duration = DISTANCE_PER_CROP_M / MOTOR_SPEED_MPS
     move_forward(move_duration)
 
 def shift_to_next_column():
-    """Simulates the sequence of moves to align with the next column."""
     print("--- Shifting to the next column ---")
     shift_duration = COLUMN_SHIFT_DISTANCE_M / MOTOR_SPEED_MPS
     turn_right(NINETY_DEGREE_TURN_TIME_S)
@@ -92,32 +160,27 @@ def shift_to_next_column():
     print("--- Aligned with the next column ---")
 
 def analyze_plant_at(video_capture, row, col):
-    """Captures an image from the IP camera and sends it to the backend."""
     print(f"-> Analyzing plant at (Col: {col}, Row: {row}).")
+    
+    # <<< MODIFIED: Perform the servo scan before capturing image >>>
+    perform_servo_scan()
+    
     print("   Capturing frame from IP camera...")
-
-    # Grab a single frame from the video stream
     ret, frame = video_capture.read()
     if not ret:
-        print("   [ERROR] Could not read frame from video stream. Check camera connection.")
+        print("   [ERROR] Could not read frame from video stream.")
         return
-
-    # Encode the captured frame to JPEG format in memory
     is_success, buffer = cv2.imencode(".jpg", frame)
     if not is_success:
         print("   [ERROR] Could not encode frame to JPEG.")
         return
-
     image_bytes = buffer.tobytes()
-
-    # Prepare data for the POST request
     payload = {'language_code': 'en', 'row': row, 'col': col}
     files = {'image': ('image.jpg', image_bytes, 'image/jpeg')}
-
     try:
         print("   Sending image to backend server...")
-        response = requests.post(BACKEND_URL, data=payload, files=files, timeout=30)
-        response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+        response = requests.post(BACKEND_URL, data=payload, files=files, timeout=90)
+        response.raise_for_status()
         print(f"   Success! Backend responded with status code: {response.status_code}")
     except requests.exceptions.RequestException as e:
         print(f"   [ERROR] Failed to send image to backend: {e}")
@@ -127,35 +190,24 @@ def analyze_plant_at(video_capture, row, col):
 # -----------------------------------------------------------------------------
 
 def start_farm_scan():
-    """Orchestrates the entire simulated farm scan."""
-    print("--- Starting AgriSense Farm Scan (SIMULATION MODE) ---")
-
-    # Initialize video capture from the IP Camera
+    print("--- Starting AgriSense Farm Scan (HARDWARE MODE) ---")
     cap = cv2.VideoCapture(IP_CAMERA_URL)
     if not cap.isOpened():
         print(f"[FATAL ERROR] Could not open video stream at {IP_CAMERA_URL}")
-        print("Please check the URL and ensure your phone's IP camera app is running.")
         return
-
     print(f"Successfully connected to IP Camera at {IP_CAMERA_URL}")
-    time.sleep(2) # Give camera stream time to stabilize
-
+    time.sleep(2)
     for col in range(TOTAL_COLUMNS):
         print(f"\n===== SCANNING COLUMN {col} =====")
         for row in range(CROPS_PER_ROW):
             analyze_plant_at(cap, row, col)
-
-            # Simulate moving to the next plant if it's not the last one in the row
             if row < CROPS_PER_ROW - 1:
                 move_forward_one_plant()
-                time.sleep(1) # Brief pause between plants
-
-        # Simulate shifting to the next column if it's not the final column
+                time.sleep(1)
         if col < TOTAL_COLUMNS - 1:
             shift_to_next_column()
-            time.sleep(2) # Brief pause before starting next column
-
-    cap.release() # Release the video capture object
+            time.sleep(2)
+    cap.release()
     print("\n===== Farm Scan Complete =====")
 
 if __name__ == "__main__":
@@ -165,6 +217,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nScan interrupted by user.")
     finally:
-        # GPIO.cleanup() is not needed in simulation mode
-        print("Simulation finished. Exiting script.")
-
+        print("Cleaning up GPIO...")
+        if servo_pwm: # <<< NEW
+            servo_pwm.stop() # <<< NEW: Stop the servo PWM
+        GPIO.cleanup()
