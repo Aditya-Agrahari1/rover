@@ -10,15 +10,15 @@ while True:
     sleep(1)
 
     # Back to center
-    servo.angle = 0
+    servo.angle = 45
     sleep(1)
 
     # Left -90° (or  -90 if calibrated)
-    servo.angle = -90
+    servo.angle = 90
     sleep(1)
 
     # Back to center
-    servo.angle = 0
+    servo.angle = 135
     sleep(1)
 
     # Wait 2 seconds
