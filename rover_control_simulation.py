@@ -62,7 +62,7 @@ def right(t=1, speed=70):
     pwmA.ChangeDutyCycle(speed)
     pwmB.ChangeDutyCycle(speed)
     sleep(t)
-    stop()
+    stop() 
 
 try:
     # Example sequence
