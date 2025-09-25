@@ -1,58 +1,49 @@
 from gpiozero import Servo
 from time import sleep
 
-# Use GPIO pin 18 for the servo's signal wire.
-# You can change this number if you use a different pin.
-servo = Servo(18)
+# Configure servo for standard 180-degree servo (not continuous rotation)
+# Set min_pulse_width and max_pulse_width for standard servo
+servo = Servo(18, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
 
 print("Starting servo control script. Press Ctrl+C to exit.")
 
 try:
-    # It's good practice to start in a known position.
-    # We'll start at the center.
+    # Initialize at center position (90 degrees)
     print("Initializing at center position (0)...")
-    servo.value = 0
+    servo.value = 0  # Center position
     sleep(2)
-
-    # This is the infinite loop for your pattern.
+    
+    # Main control loop
     while True:
-        # --- First part of the pattern: Left and back ---
-        
-        # 1. Rotate 90 degrees LEFT from center
-        print("Moving LEFT (-90 degrees)")
-        servo.value = -1  # Go to the minimum angle
-        
-        # 2. Wait for 2 seconds
-        sleep(2)
-        
-        # 3. Go back 90 degrees RIGHT to the original (center) position
-        print("Returning to CENTER")
-        servo.value = 0   # Go to the middle angle
-        
-        # 4. Wait for another 2 seconds
-        sleep(2)
-
-        # --- Second part of the pattern: Right and back ---
-
-        # 5. Rotate 90 degrees RIGHT from center
+        # 1. Move 90 degrees RIGHT from center
         print("Moving RIGHT (+90 degrees)")
-        servo.value = 1   # Go to the maximum angle
+        servo.value = 1  # Maximum position (90 degrees right from center)
+        sleep(2)  # Wait 2 seconds
         
-        # 6. Wait for 2 seconds
-        sleep(2)
-
-        # 7. Go back 90 degrees LEFT to the original (center) position
+        # 2. Return to center (original position)
         print("Returning to CENTER")
-        servo.value = 0   # Go back to the middle angle
+        servo.value = 0  # Center position
+        sleep(2)  # Wait 2 seconds
         
-        # 8. Wait for 2 seconds before repeating the whole loop
-        sleep(2)
+        # 3. Move 90 degrees LEFT from center
+        print("Moving LEFT (-90 degrees)")
+        servo.value = -1  # Minimum position (90 degrees left from center)
+        sleep(2)  # Wait 2 seconds
+        
+        # 4. Return to center (original position)
+        print("Returning to CENTER")
+        servo.value = 0  # Center position
+        sleep(2)  # Wait 2 seconds (as requested)
+        
+        print("Waiting 2 seconds before next cycle...")
+        # The cycle will repeat automatically
 
 except KeyboardInterrupt:
-    # This block runs when you press Ctrl+C to stop the script.
     print("\nScript stopped by user.")
-
+    
 finally:
-    # This ensures the servo is properly shut down and GPIO is cleaned up.
+    # Clean up GPIO
     print("Cleaning up GPIO...")
+    servo.value = 0  # Return to center before closing
+    sleep(0.5)
     servo.close()
