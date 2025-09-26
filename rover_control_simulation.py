@@ -65,7 +65,7 @@ def sweep_servo():
 # =========================
 # Camera + Backend setup
 WEBCAM_URL = "http://192.168.117.249:8080/photo.jpg"   # 📱 Mobile IP Webcam snapshot
-BACKEND_URL = "https://agrisense-backend-trdc.onrender.com/analyze"  # 🌐 FastAPI backend
+BACKEND_URL = "https://rover-backend.onrender.com/analyze"  # 🌐 FastAPI backend
 LANGUAGE_CODE = "en"
 ROW, COL = 1, 1
 
