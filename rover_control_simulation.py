@@ -25,7 +25,7 @@ SERVO_PIN = 18
 
 # Network
 WEBCAM_URL = "http://192.168.117.249:8080/photo.jpg"   # mobile IP webcam snapshot URL
-BACKEND_URL = "https://agrisense-backend-trdc.onrender.com/analyze"
+BACKEND_URL = "https://rover-backend.onrender.com/analyze"
 
 # Rover Behavior
 MOTOR_SPEED = 0.75
