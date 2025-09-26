@@ -1,163 +1,159 @@
-# =================================================================================
-# AgriSense Rover - Main Control Script
-# Version: 3.1 (Stable with Clean Shutdown)
-# =================================================================================
-
-import requests
-import time
-import io
-from PIL import Image
-from gpiozero import Motor, AngularServo
+# -*- coding: utf-8 -*-
+import RPi.GPIO as GPIO
+from gpiozero import AngularServo
 from time import sleep
+import requests, time, threading, queue, io
+from PIL import Image   # Pillow for image resize
 
-# --- ⚙️ 1. CONFIGURATION ---
+# =========================
+# Motor driver pins (BCM numbering)
+IN1, IN2, ENA = 24, 23, 25
+IN3, IN4, ENB = 17, 27, 22
 
-# L298N Motor Driver Pins (BCM numbering)
-MOTOR_L_FORWARD = 24
-MOTOR_L_BACKWARD = 23
-MOTOR_L_ENABLE = 25
-MOTOR_R_FORWARD = 17
-MOTOR_R_BACKWARD = 27
-MOTOR_R_ENABLE = 22
+GPIO.setmode(GPIO.BCM)
+GPIO.setup([IN1, IN2, IN3, IN4, ENA, ENB], GPIO.OUT)
 
-# SG90 Servo Motor Pin
-SERVO_PIN = 18
+pwmA = GPIO.PWM(ENA, 100)  # 100 Hz PWM
+pwmB = GPIO.PWM(ENB, 100)
+pwmA.start(0)
+pwmB.start(0)
 
-# Network
-WEBCAM_URL = "http://192.168.117.249:8080/photo.jpg"   # mobile IP webcam snapshot URL
-BACKEND_URL = "https://rover-backend.onrender.com/analyze"
+def stop():
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.LOW)
+    pwmA.ChangeDutyCycle(0)
+    pwmB.ChangeDutyCycle(0)
 
-# Rover Behavior
-MOTOR_SPEED = 0.75
-MOVE_DURATION_S = 3
-PAUSE_DURATION_S = 2
+def forward(t=4, speed=70):
+    """Move rover in reversed forward direction."""
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    pwmA.ChangeDutyCycle(speed)
+    pwmB.ChangeDutyCycle(speed)
+    sleep(t)
+    stop()
 
-# Image Compression
-IMAGE_QUALITY = 75  # JPEG quality
-MAX_IMAGE_KB = 200  # target compressed size
+# =========================
+# Servo setup (SG90 on GPIO18 – hardware PWM capable)
+servo = AngularServo(
+    18,
+    min_angle=0,
+    max_angle=180,
+    min_pulse_width=0.0005,
+    max_pulse_width=0.0025
+)
 
-# Analysis Parameters
+def sweep_servo():
+    """Sweep servo slowly: center → right → center → left → center."""
+    for angle in range(0, 91, 2):  
+        servo.angle = angle
+        sleep(0.05)
+    for angle in range(90, -1, -2):  
+        servo.angle = angle
+        sleep(0.05)
+    for angle in range(0, 91, 2):  
+        servo.angle = 180 - angle
+        sleep(0.05)
+    for angle in range(90, 181, 2):  
+        servo.angle = angle
+        sleep(0.05)
+
+# =========================
+# Camera + Backend setup
+WEBCAM_URL = "http://192.168.117.249:8080/photo.jpg"   # 📱 Mobile IP Webcam snapshot
+BACKEND_URL = "https://agrisense-backend-trdc.onrender.com/analyze"  # 🌐 FastAPI backend
 LANGUAGE_CODE = "en"
 ROW, COL = 1, 1
 
-# --- 🤖 2. HARDWARE INITIALIZATION ---
-print("Initializing hardware...")
-try:
-    motor_left = Motor(forward=MOTOR_L_FORWARD, backward=MOTOR_L_BACKWARD, enable=MOTOR_L_ENABLE)
-    motor_right = Motor(forward=MOTOR_R_FORWARD, backward=MOTOR_R_BACKWARD, enable=MOTOR_R_ENABLE)
-    servo = AngularServo(SERVO_PIN, min_angle=-90, max_angle=90)
-    HARDWARE_OK = True
-    print("✅ Motors and Servo initialized successfully.")
-except Exception as e:
-    print(f"🛑 ERROR: Could not initialize hardware. Details: {e}")
-    HARDWARE_OK = False
+# =========================
+# Queue + Background Worker
+image_queue = queue.Queue()
 
-# --- 🦾 3. CORE FUNCTIONS ---
-
-def move_forward(duration, speed):
-    if not HARDWARE_OK: return
-    print(f"▶️ Rover moving forward for {duration}s at {int(speed*100)}% speed...")
-    motor_left.forward(speed=speed)
-    motor_right.forward(speed=speed)
-    sleep(duration)
-
-def stop_motors():
-    if not HARDWARE_OK: return
-    print("⏹️ Rover stopped.")
-    motor_left.stop()
-    motor_right.stop()
-
-def sweep_servo():
-    if not HARDWARE_OK: return
-    print("↔️ Performing servo sweep...")
-    try:
-        servo.angle = 0
-        sleep(1)
-        servo.angle = -90
-        sleep(1)
-        servo.angle = 90
-        sleep(1)
-        servo.angle = 0
-        sleep(1)
-        print("✅ Sweep complete.")
-    except Exception as e:
-        print(f"⚠️ Servo sweep failed: {e}")
-
-def resize_image(image_bytes, max_size=(640, 480), max_kb=MAX_IMAGE_KB, quality=IMAGE_QUALITY):
-    """Resize + compress image to target size."""
+def resize_image(image_bytes, max_size=(640, 480), max_kb=200):
+    """Resize + compress image until under max_kb."""
     img = Image.open(io.BytesIO(image_bytes))
-    img.thumbnail(max_size)
+    img.thumbnail(max_size)   # shrink keeping aspect ratio
+    quality = 85
     while True:
         output = io.BytesIO()
         img.save(output, format="JPEG", quality=quality, optimize=True)
         data = output.getvalue()
         if len(data) <= max_kb * 1024 or quality <= 30:
             return data
-        quality -= 5
+        quality -= 5  # lower quality step by step if still too big
 
-def capture_and_send():
-    print("\n--- Starting Analysis Cycle ---")
+def uploader_worker():
+    """Background thread: uploads images from queue."""
+    while True:
+        snapshot_bytes, idx = image_queue.get()
+        try:
+            t0 = time.time()
+            print(f"[UPLOAD] ⬆️ Uploading image {idx} ({len(snapshot_bytes)/1024:.1f} KB)...")
+
+            files = {"image": (f"snapshot_{idx}.jpg", snapshot_bytes, "image/jpeg")}
+            data = {"language_code": LANGUAGE_CODE, "row": ROW, "col": COL}
+
+            response = requests.post(BACKEND_URL, files=files, data=data, timeout=300)
+
+            if response.status_code == 200:
+                pdf_filename = f"AgriSense_Report_{ROW}_{COL}_{idx}.pdf"
+                with open(pdf_filename, "wb") as f:
+                    f.write(response.content)
+                print(f"[UPLOAD] ✅ Report saved {pdf_filename} (took {time.time()-t0:.1f}s)")
+            else:
+                print(f"[UPLOAD] ❌ Backend error {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"[UPLOAD] ❌ Failed image {idx}: {e}")
+        finally:
+            image_queue.task_done()
+
+# Start background uploader
+threading.Thread(target=uploader_worker, daemon=True).start()
+
+# =========================
+# Capture function
+capture_count = 0
+def capture_image():
+    global capture_count
     try:
-        # Capture image
-        print(f"📸 Requesting image from {WEBCAM_URL}...")
+        print("[CAPTURE] 📸 Requesting image from webcam...")
         img_response = requests.get(WEBCAM_URL, timeout=10)
         img_response.raise_for_status()
-        original_kb = len(img_response.content) / 1024
-        print(f"✔️ Image captured ({original_kb:.1f} KB).")
 
-        # Resize + compress
-        compressed_bytes = resize_image(img_response.content)
-        compressed_kb = len(compressed_bytes) / 1024
-        print(f"🗜️ Image compressed to {compressed_kb:.1f} KB.")
+        resized_bytes = resize_image(img_response.content)
+        capture_count += 1
+        image_queue.put((resized_bytes, capture_count))
 
-        # Upload
-        files = {"image": ("snapshot.jpg", compressed_bytes, "image/jpeg")}
-        data = {"language_code": LANGUAGE_CODE, "row": ROW, "col": COL}
-        print(f"📤 Uploading to {BACKEND_URL}...")
-        t_start = time.time()
-        backend_response = requests.post(BACKEND_URL, files=files, data=data, timeout=90)
-        t_end = time.time()
-        backend_response.raise_for_status()
-        print(f"✔️ Upload successful! ({backend_response.status_code}) in {t_end - t_start:.2f}s.")
-
-        # Save PDF
-        pdf_filename = f"AgriSense_Report_R{ROW}_C{COL}.pdf"
-        with open(pdf_filename, "wb") as f:
-            f.write(backend_response.content)
-        print(f"📄 PDF report saved as '{pdf_filename}'.")
-
-    except requests.exceptions.RequestException as e:
-        print(f"🛑 NETWORK ERROR: {e}")
+        print(f"[CAPTURE] ✅ Image {capture_count} resized "
+              f"({len(resized_bytes)/1024:.1f} KB) → queued for upload")
     except Exception as e:
-        print(f"🛑 Unexpected error: {e}")
+        print(f"[CAPTURE] ❌ Failed: {e}")
 
-# --- ▶️ 4. MAIN EXECUTION LOOP ---
+# =========================
+# Main loop
+try:
+    while True:
+        print("\n[INFO] 🚙 Rover moving forward...")
+        forward(2, 70)
+        sleep(2)
+        print("[INFO] 🛑 Rover stopped.")
 
-if __name__ == "__main__":
-    if not HARDWARE_OK:
-        print("Exiting due to hardware initialization failure.")
-    else:
-        try:
-            servo.angle = 0  # center servo at start
-            print("\n--- AgriSense Rover Initialized. Starting main loop (Ctrl+C to stop) ---")
+        # Capture snapshot and queue upload
+        capture_image()
 
-            while True:
-                move_forward(MOVE_DURATION_S, MOTOR_SPEED)
-                stop_motors()
-                sleep(PAUSE_DURATION_S)
+        print("[INFO] 🔄 Servo sweeping...")
+        sweep_servo()
 
-                capture_and_send()
-                sweep_servo()
+except KeyboardInterrupt:
+    pass
 
-                print("\n--- Cycle complete. Waiting before next cycle... ---")
-                sleep(5)
-
-        except KeyboardInterrupt:
-            print("\n🛑 Program interrupted by user.")
-        finally:
-            print("🧹 Shutting down... cleaning up GPIO.")
-            if HARDWARE_OK:
-                motor_left.stop()
-                motor_right.stop()
-                servo.angle = None   # release PWM safely
-            print("✅ Shutdown complete.")
+finally:
+    stop()
+    pwmA.stop()
+    pwmB.stop()
+    GPIO.cleanup()
+    print("[INFO] ✅ GPIO cleanup done.")
