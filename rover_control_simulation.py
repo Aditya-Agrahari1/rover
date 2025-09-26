@@ -1,163 +1,162 @@
-# =================================================================================
-# AgriSense Rover - Main Control Script
-# Version: 3.1 (Stable with Clean Shutdown)
-# =================================================================================
-
-import requests
-import time
-import io
-from PIL import Image
-from gpiozero import Motor, AngularServo
+import paho.mqtt.client as mqtt
+import RPi.GPIO as GPIO
 from time import sleep
+import requests
+from picamera2 import Picamera2
+import threading
 
-# --- ⚙️ 1. CONFIGURATION ---
+# --- Backend & MQTT Configuration ---
+AGRISENSE_BACKEND_URL = "https://agrisense-backend-trdc.onrender.com"
+MQTT_HOSTNAME = "00ad4f388bdb4d1787d970ef423e0443.s1.eu.hivemq.cloud"
+MQTT_PORT = 8883
+MQTT_USERNAME = "agrisense-rover"
+MQTT_PASSWORD = "Agrisense@1"
+MQTT_COMMAND_TOPIC = "agrisense/rover/command"
 
-# L298N Motor Driver Pins (BCM numbering)
-MOTOR_L_FORWARD = 24
-MOTOR_L_BACKWARD = 23
-MOTOR_L_ENABLE = 25
-MOTOR_R_FORWARD = 17
-MOTOR_R_BACKWARD = 27
-MOTOR_R_ENABLE = 22
+# --- Hardware Configuration (from your provided logic) ---
+# Motor driver pins
+IN1, IN2, ENA = 24, 23, 25
+IN3, IN4, ENB = 17, 27, 22
 
-# SG90 Servo Motor Pin
-SERVO_PIN = 18
+# Camera setup
+picam2 = Picamera2()
+camera_config = picam2.create_still_configuration()
+picam2.configure(camera_config)
 
-# Network
-WEBCAM_URL = "http://192.168.117.249:8080/photo.jpg"   # mobile IP webcam snapshot URL
-BACKEND_URL = "https://agrisense-backend-trdc.onrender.com/analyze"
+# GPIO setup
+GPIO.setmode(GPIO.BCM)
+GPIO.setup([IN1, IN2, IN3, IN4, ENA, ENB], GPIO.OUT)
+pwmA = GPIO.PWM(ENA, 100)
+pwmB = GPIO.PWM(ENB, 100)
+pwmA.start(0)
+pwmB.start(0)
 
-# Rover Behavior
-MOTOR_SPEED = 0.75
-MOVE_DURATION_S = 3
-PAUSE_DURATION_S = 2
+# --- Global State Variables ---
+# These flags control the survey loop.
+survey_active = False
+survey_thread = None
+survey_id = None
 
-# Image Compression
-IMAGE_QUALITY = 75  # JPEG quality
-MAX_IMAGE_KB = 200  # target compressed size
-
-# Analysis Parameters
-LANGUAGE_CODE = "en"
-ROW, COL = 1, 1
-
-# --- 🤖 2. HARDWARE INITIALIZATION ---
-print("Initializing hardware...")
-try:
-    motor_left = Motor(forward=MOTOR_L_FORWARD, backward=MOTOR_L_BACKWARD, enable=MOTOR_L_ENABLE)
-    motor_right = Motor(forward=MOTOR_R_FORWARD, backward=MOTOR_R_BACKWARD, enable=MOTOR_R_ENABLE)
-    servo = AngularServo(SERVO_PIN, min_angle=-90, max_angle=90)
-    HARDWARE_OK = True
-    print("✅ Motors and Servo initialized successfully.")
-except Exception as e:
-    print(f"🛑 ERROR: Could not initialize hardware. Details: {e}")
-    HARDWARE_OK = False
-
-# --- 🦾 3. CORE FUNCTIONS ---
-
-def move_forward(duration, speed):
-    if not HARDWARE_OK: return
-    print(f"▶️ Rover moving forward for {duration}s at {int(speed*100)}% speed...")
-    motor_left.forward(speed=speed)
-    motor_right.forward(speed=speed)
-    sleep(duration)
-
+# --- Motor Control Functions ---
 def stop_motors():
-    if not HARDWARE_OK: return
-    print("⏹️ Rover stopped.")
-    motor_left.stop()
-    motor_right.stop()
+    GPIO.output([IN1, IN2, IN3, IN4], GPIO.LOW)
+    pwmA.ChangeDutyCycle(0)
+    pwmB.ChangeDutyCycle(0)
 
-def sweep_servo():
-    if not HARDWARE_OK: return
-    print("↔️ Performing servo sweep...")
+def move_forward(t=2, speed=70):
+    # This function now matches your specific pin logic for forward movement
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    pwmA.ChangeDutyCycle(speed)
+    pwmB.ChangeDutyCycle(speed)
+    sleep(t)
+    stop_motors()
+
+# --- Image & Network Functions ---
+def send_image_to_backend(file_path, current_survey_id):
+    """Posts an image file to the backend."""
+    url = f"{AGRISENSE_BACKEND_URL}/rover/upload_image"
     try:
-        servo.angle = 0
-        sleep(1)
-        servo.angle = -90
-        sleep(1)
-        servo.angle = 90
-        sleep(1)
-        servo.angle = 0
-        sleep(1)
-        print("✅ Sweep complete.")
-    except Exception as e:
-        print(f"⚠️ Servo sweep failed: {e}")
-
-def resize_image(image_bytes, max_size=(640, 480), max_kb=MAX_IMAGE_KB, quality=IMAGE_QUALITY):
-    """Resize + compress image to target size."""
-    img = Image.open(io.BytesIO(image_bytes))
-    img.thumbnail(max_size)
-    while True:
-        output = io.BytesIO()
-        img.save(output, format="JPEG", quality=quality, optimize=True)
-        data = output.getvalue()
-        if len(data) <= max_kb * 1024 or quality <= 30:
-            return data
-        quality -= 5
-
-def capture_and_send():
-    print("\n--- Starting Analysis Cycle ---")
-    try:
-        # Capture image
-        print(f"📸 Requesting image from {WEBCAM_URL}...")
-        img_response = requests.get(WEBCAM_URL, timeout=10)
-        img_response.raise_for_status()
-        original_kb = len(img_response.content) / 1024
-        print(f"✔️ Image captured ({original_kb:.1f} KB).")
-
-        # Resize + compress
-        compressed_bytes = resize_image(img_response.content)
-        compressed_kb = len(compressed_bytes) / 1024
-        print(f"🗜️ Image compressed to {compressed_kb:.1f} KB.")
-
-        # Upload
-        files = {"image": ("snapshot.jpg", compressed_bytes, "image/jpeg")}
-        data = {"language_code": LANGUAGE_CODE, "row": ROW, "col": COL}
-        print(f"📤 Uploading to {BACKEND_URL}...")
-        t_start = time.time()
-        backend_response = requests.post(BACKEND_URL, files=files, data=data, timeout=90)
-        t_end = time.time()
-        backend_response.raise_for_status()
-        print(f"✔️ Upload successful! ({backend_response.status_code}) in {t_end - t_start:.2f}s.")
-
-        # Save PDF
-        pdf_filename = f"AgriSense_Report_R{ROW}_C{COL}.pdf"
-        with open(pdf_filename, "wb") as f:
-            f.write(backend_response.content)
-        print(f"📄 PDF report saved as '{pdf_filename}'.")
-
+        with open(file_path, 'rb') as f:
+            files = {'image': (file_path, f, 'image/jpeg')}
+            data = {'survey_id': current_survey_id}
+            response = requests.post(url, files=files, data=data)
+            response.raise_for_status()
+        print(f"Successfully sent {file_path} for survey {current_survey_id}")
+        return True
     except requests.exceptions.RequestException as e:
-        print(f"🛑 NETWORK ERROR: {e}")
+        print(f"Failed to send image: {e}")
+        return False
+
+# --- Main Survey Loop ---
+def survey_loop():
+    """The main loop for the rover's operation."""
+    global survey_active, survey_id
+    
+    print(f"--- Starting Survey Loop (ID: {survey_id}) ---")
+    picam2.start()
+    sleep(2) # Camera warm-up
+
+    image_counter = 0
+    # The loop continues as long as the survey_active flag is True.
+    while survey_active:
+        print(f"Survey {survey_id}: Moving forward...")
+        move_forward(t=2, speed=70)
+
+        # Check again in case a 'STOP' command was received during movement
+        if not survey_active:
+            break
+
+        image_counter += 1
+        file_path = f"/home/pi/Pictures/{survey_id}img{image_counter}.jpg"
+        print(f"Survey {survey_id}: Capturing image {image_counter}...")
+        picam2.capture_file(file_path)
+        
+        send_image_to_backend(file_path, survey_id)
+
+        print(f"Survey {survey_id}: Waiting for 2 seconds...")
+        sleep(2)
+
+    picam2.stop()
+    stop_motors()
+    print(f"--- Survey Loop Stopped (ID: {survey_id}) ---")
+
+    # Final step: Notify the backend that this survey is complete.
+    try:
+        print(f"Notifying backend of survey completion for {survey_id}...")
+        requests.post(f"{AGRISENSE_BACKEND_URL}/rover/survey_complete", json={"survey_id": survey_id})
     except Exception as e:
-        print(f"🛑 Unexpected error: {e}")
+        print(f"Failed to notify backend: {e}")
 
-# --- ▶️ 4. MAIN EXECUTION LOOP ---
 
-if __name__ == "__main__":
-    if not HARDWARE_OK:
-        print("Exiting due to hardware initialization failure.")
+# --- MQTT Handler ---
+def on_connect(client, userdata, flags, rc, properties):
+    if rc == 0:
+        print("Connected to MQTT Broker!")
+        client.subscribe(MQTT_COMMAND_TOPIC)
     else:
-        try:
-            servo.angle = 0  # center servo at start
-            print("\n--- AgriSense Rover Initialized. Starting main loop (Ctrl+C to stop) ---")
+        print(f"Failed to connect, return code {rc}\n")
 
-            while True:
-                move_forward(MOVE_DURATION_S, MOTOR_SPEED)
-                stop_motors()
-                sleep(PAUSE_DURATION_S)
+def on_message(client, userdata, msg):
+    """This function is the main controller, reacting to app commands."""
+    global survey_active, survey_thread, survey_id
+    command = msg.payload.decode()
+    print(f"Received command: {command}")
 
-                capture_and_send()
-                sweep_servo()
+    if command == "START" and not survey_active:
+        survey_active = True
+        survey_id = f"survey_{int(time.time())}"
+        # Start the survey_loop in a new thread to keep the MQTT client responsive.
+        survey_thread = threading.Thread(target=survey_loop)
+        survey_thread.start()
+    elif command == "STOP" and survey_active:
+        # Simply setting this flag to False will cause the loop in the thread to exit.
+        survey_active = False
+        print("STOP signal received. The survey will end after its current action.")
 
-                print("\n--- Cycle complete. Waiting before next cycle... ---")
-                sleep(5)
-
-        except KeyboardInterrupt:
-            print("\n🛑 Program interrupted by user.")
-        finally:
-            print("🧹 Shutting down... cleaning up GPIO.")
-            if HARDWARE_OK:
-                motor_left.stop()
-                motor_right.stop()
-                servo.angle = None   # release PWM safely
-            print("✅ Shutdown complete.")
+# --- Main Execution ---
+if _name_ == '_main_':
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    client.tls_set(tls_version=mqtt.ssl.PROTOCOL_TLS)
+    client.on_connect = on_connect
+    client.on_message = on_message
+    
+    try:
+        print(f"Connecting to {MQTT_HOSTNAME}...")
+        client.connect(MQTT_HOSTNAME, MQTT_PORT, 60)
+        client.loop_forever()
+    except KeyboardInterrupt:
+        print("Script interrupted by user.")
+    finally:
+        # This ensures that motors stop and GPIO pins are cleaned up safely.
+        survey_active = False # Stop the survey loop if it's running
+        if survey_thread is not None:
+            survey_thread.join() # Wait for the thread to finish
+        stop_motors()
+        pwmA.stop()
+        pwmB.stop()
+        GPIO.cleanup()
+        print("Motors stopped and GPIO cleaned up.")
